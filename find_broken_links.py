@@ -100,8 +100,7 @@ class BrokenLinkScanner(object):
 
             ## Add links to queue
             for link in r.links:
-                if link not in self._results:
-                    self._push_task(link)
+                self._push_task(link)
 
             ## Print a status line
             self._print_status(url, r.status)
@@ -126,9 +125,12 @@ class BrokenLinkScanner(object):
         return k, v
 
     def _push_task(self, name, task=None):
+        name = name.encode('utf-8')
+        if name in self._results:
+            return
         if task is not None:
             task = json.dumps(task).encode('utf-8')
-        self._queue[name.encode('utf-8')] = task
+        self._queue[name] = task
 
     def _process_url(self, url):
         if url.split(':', 1)[0] not in ('http', 'https'):
