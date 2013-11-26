@@ -96,7 +96,7 @@ class BrokenLinkScanner(object):
                 'status': r.status,
                 'exception': str(r.exception),
             }
-            self._store(dbrec)
+            self._store(r.url, dbrec)
 
             ## Add links to queue
             for link in r.links:
