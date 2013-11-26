@@ -119,8 +119,10 @@ class BrokenLinkScanner(object):
 
     def _pop_task(self):
         k, v = self._queue.popitem()
-        if v is not None:
+        try:
             v = json.loads(v)
+        except ValueError:
+            v = None
         return k, v
 
     def _push_task(self, name, task=None):
