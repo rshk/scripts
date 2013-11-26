@@ -224,7 +224,12 @@ print("Processed {0} pages".format(len(bls._results)))
 
 pages_per_code = defaultdict(list)
 for url, data in bls._results.iteritems():
-    pages_per_code[data.status].append(url)
+    try:
+        data = json.loads(data)
+    except ValueError:
+        pass
+    else:
+        pages_per_code[data['status']].append(url)
 
 for code, urls in pages_per_code.iteritems():
     print("Links returning {0}: {1}".format(code, len(urls)))
