@@ -169,13 +169,31 @@ class BrokenLinkScanner(object):
 
         return True
 
+    def _is_internal(self, url):
+        """Check whether this is an internal link"""
+        return url.startswith(self.base_url)
+
+    def _extract_links(self, response):
+        """Extract links from a page, if applicable"""
+
+        if not response.ok:
+            return  # We don't have links!
+
+        content_type = response.headers.get('Content-type', '').split(';')[0]
+        if content_type == 'text/html':
+            tree = lxml.html.fromstring(response.content)
+            for href in tree.xpath('//a/@href'):
+                href = href.split('#', 1)[0]
+                yield urlparse.urljoin(self.base_url, href)
+
     def _process_url(self, url):
+        """Process (download) a URL"""
         if url.split(':', 1)[0] not in ('http', 'https'):
             return ResultRecord(
                 url=url, exception=ValueError("Invalid url"))
 
         try:
-            if url.startswith(self.base_url):
+            if self._is_internal(self.base_url):
                 return self._process_internal(url)
             else:
                 return self._process_external(url)
@@ -189,15 +207,7 @@ class BrokenLinkScanner(object):
         For internal links, we also want to extract all the href links
         """
         response = requests.get(url)
-
-        links = []
-        if response.ok:
-            tree = lxml.html.fromstring(response.content)
-            links = set()
-            for href in tree.xpath('//a/@href'):
-                href = href.split('#', 1)[0]
-                links.add(urlparse.urljoin(self.base_url, href))
-
+        links = set(self._extract_links(response))
         return ResultRecord(
             url=url,
             links=links,
