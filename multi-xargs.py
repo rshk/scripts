@@ -39,5 +39,5 @@ for partition in partitioned_args:
 
 subprocess.call(('tmux', 'new-window', commands[0]))
 for cmd in commands[1:]:
-    subprocess.call(('tmux', 'split-window', '-h', cmd))
+    subprocess.call(('tmux', 'split-window', '-v', cmd))
 subprocess.call(('tmux', 'select-layout', 'tiled'))
