@@ -12,6 +12,9 @@ import sys
 import traceback
 import urlparse
 
+
+DEBUG = False  # Print debug messages
+
 missing_deps = []
 
 try:
@@ -71,15 +74,19 @@ class BrokenLinkScanner(object):
         self._results = anydbm.open(name + '.db', 'c')
         self._queue = anydbm.open(name + '.queue', 'c')
 
-        self._push_task(start_url)
+        self._push_task(start_url, trail=[])
 
     def run(self):
+        """Continue processing tasks until queue is empty"""
+
         print("Running...")
-        ## Loop until queue is empty
+
         while self._queue_length() > 0:
-            url, void = self._pop_task()
+            ## Get a task from the queue
+            url, current_task = self._pop_task()
 
             ## Process the url, to get status + links
+            self._debug("Processing: " + url)
             r = self._process_url(url)
 
             ## Keep success/failure count
@@ -100,13 +107,21 @@ class BrokenLinkScanner(object):
 
             ## Add links to queue
             for link in r.links:
-                self._push_task(link)
+                trail = []
+                if 'trail' in current_task:
+                    trail.extend(current_task['trail'])
+                trail.append(url)
+                self._push_task(link, trail=trail)
 
             ## Print a status line
-            self._print_status(url, r.status)
+            self._print_status(url, r)
 
         ## Print a "done" message upon completion
         self._print_done()
+
+    def _debug(self, msg):
+        if DEBUG:
+            print(msg, file=sys.stderr)
 
     def _store(self, name, value):
         self._results[name.encode('utf-8')] = \
@@ -118,27 +133,67 @@ class BrokenLinkScanner(object):
 
     def _pop_task(self):
         k, v = self._queue.popitem()
-        try:
-            v = json.loads(v)
-        except ValueError:
-            v = None
+        v = json.loads(v)
         return k, v
 
-    def _push_task(self, name, task=None):
+    def _push_task(self, name, **task):
+        self._debug("Push task: {0!r} {1!r}".format(name, task))
         name = name.encode('utf-8')
-        if name in self._results:
+        if not self._should_follow(name, task):
             return
-        if task is not None:
-            task = json.dumps(task).encode('utf-8')
+        task = json.dumps(task).encode('utf-8')
         self._queue[name] = task
 
+    def _should_follow(self, url, task):
+        """
+        Decide whether we should follow an url, executing a task.
+        """
+
+        ## We already run this task
+        if url in self._results:
+            self._debug("Skipping task {0}: already run".format(url))
+            return False
+
+        ## We only support http(s):// URLs right now
+        if url.split(':', 1)[0] not in ('http', 'https'):
+            self._debug("Skipping task {0}: unsupported scheme".format(url))
+            return False
+
+        ## we need to find a way to avoid ending up following endless
+        ## paths, such as facet links in filtering forms.
+        ## Best way would be to detect such URLs, but for now, we just
+        ## limit the maximum trail length to 5.
+        if 'trail' in task and len(task['trail']) >= 5:
+            self._debug("Skipping task {0}: trail length exceeded".format(url))
+            return False
+
+        return True
+
+    def _is_internal(self, url):
+        """Check whether this is an internal link"""
+        return url.startswith(self.base_url)
+
+    def _extract_links(self, response):
+        """Extract links from a page, if applicable"""
+
+        if not response.ok:
+            return  # We don't have links!
+
+        content_type = response.headers.get('Content-type', '').split(';')[0]
+        if content_type == 'text/html':
+            tree = lxml.html.fromstring(response.content)
+            for href in tree.xpath('//a/@href'):
+                href = href.split('#', 1)[0]
+                yield urlparse.urljoin(self.base_url, href)
+
     def _process_url(self, url):
+        """Process (download) a URL"""
         if url.split(':', 1)[0] not in ('http', 'https'):
             return ResultRecord(
                 url=url, exception=ValueError("Invalid url"))
 
         try:
-            if url.startswith(self.base_url):
+            if self._is_internal(self.base_url):
                 return self._process_internal(url)
             else:
                 return self._process_external(url)
@@ -148,16 +203,11 @@ class BrokenLinkScanner(object):
             return ResultRecord(url=url, exception=e)
 
     def _process_internal(self, url):
+        """
+        For internal links, we also want to extract all the href links
+        """
         response = requests.get(url)
-
-        links = []
-        if response.ok:
-            tree = lxml.html.fromstring(response.content)
-            links = set()
-            for href in tree.xpath('//a/@href'):
-                href = href.split('#', 1)[0]
-                links.add(urlparse.urljoin(self.base_url, href))
-
+        links = set(self._extract_links(response))
         return ResultRecord(
             url=url,
             links=links,
@@ -166,6 +216,10 @@ class BrokenLinkScanner(object):
             exception=None)
 
     def _process_external(self, url):
+        """
+        For external URLs, we don't extract links, so we are only
+        interested in status + headers.
+        """
         ## issue a GET, but we only want headers..
         response = requests.get(url, stream=True)
         return ResultRecord(
@@ -174,18 +228,8 @@ class BrokenLinkScanner(object):
             headers=response.headers,
             exception=None)
 
-    def _print_status(self, url, status):
-        sys.stdout.write("\x1b[A\x1b[K")  # Up one line and clear
-
-        if status in xrange(200, 300):
-            sys.stderr.write("\x1b[1;32m")
-        elif status in xrange(300, 400):
-            sys.stderr.write("\x1b[1;33m")
-        else:
-            sys.stderr.write("\x1b[1;31m")
-        print("{0}\x1b[0m {1}".format(status, url))
-
-        ## Print the status line
+    def _print_status(self, url, response):
+        ## Do the calculations first, to prevent flickering
         succ = self._success_count
         fail = self._fail_count
         tot = len(self._results)
@@ -196,13 +240,30 @@ class BrokenLinkScanner(object):
             tot_pc = (tot * 100 / (tot + pending))
         except ZeroDivisionError:
             tot_pc = 'N/A'
-        print("[ {B}Processed:{E} {tot} ({tot_pc}%)  "
-              "{B}Success:{E} {succ} ({succ_pc}%)  "
-              "{B}Failed:{E} {fail} ({fail_pc}%)  "
-              "{B}Pending:{E} {pending} ]".format(
+
+        ## (Up one line, blank line) * 2
+        sys.stdout.write("\x1b[A\x1b[K" * 2)
+
+        ## Print URL + status
+        status = response.status
+        if status in xrange(200, 300):
+            sys.stderr.write("\x1b[1;32m")
+        elif status in xrange(300, 400):
+            sys.stderr.write("\x1b[1;33m")
+        else:
+            sys.stderr.write("\x1b[1;31m")
+        print("{0}\x1b[0m {1} \x1b[36m({2})\x1b[0m\n".format(
+            status, url, response.headers.get('Content-type', '???')))
+
+        ## Print the status line, with counters
+        print("[ {B}Processed:{X} {tot} ({tot_pc}%)  "
+              "{G}Success:{X} {succ} ({succ_pc}%)  "
+              "{R}Failed:{X} {fail} ({fail_pc}%)  "
+              "{B}Pending:{X} {pending} ]".format(
                   succ=succ, fail=fail, tot=tot,
                   succ_pc=succ_pc, fail_pc=fail_pc, tot_pc=tot_pc,
-                  pending=pending, B="\x1b[36m", E="\x1b[0m"))
+                  pending=pending, B="\x1b[36m", X="\x1b[0m",
+                  G="\x1b[32m", R="\x1b[31m"))
 
     def _print_done(self):
         sys.stdout.write("\x1b[K")
